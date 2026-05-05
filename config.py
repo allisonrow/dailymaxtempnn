@@ -6,10 +6,10 @@ import os
 
 # ── Data splits ──────────────────────────────────────────────────────
 TRAIN_START = date(2022, 1, 1)
-TRAIN_END = date(2024, 12, 31)
-VAL_START = date(2025, 1, 1)
-VAL_END = date(2025, 12, 31)
-TEST_START = date(2026, 1, 1)
+TRAIN_END = date(2024, 4, 16)
+VAL_START = date(2024, 4, 17)
+VAL_END = date(2025, 4, 16)
+TEST_START = date(2025, 4, 17)
 TEST_END = date(2026, 4, 16)
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")

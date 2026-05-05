@@ -47,17 +47,17 @@ The model outputs a heteroscedastic Gaussian (mu, sigma), providing both a point
 
 ## Performance
 
-### Out-of-Sample (Test: Jan–Apr 2026)
+### Out-of-Sample (Test: Apr 2025–Apr 2026, full year)
 
 | Metric | Value |
 |---|---|
-| MAE | 1.13°F |
-| RMSE | 1.54°F |
-| Bias | -0.04°F |
-| R² | 0.993 |
-| Correlation | 0.997 |
+| MAE | 1.24°F |
+| RMSE | 1.65°F |
+| Bias | +0.04°F |
+| R² | 0.992 |
+| Correlation | 0.996 |
 
-### In-Sample (Train: 2022–2024)
+### In-Sample (Train: 2022–Apr 2024)
 
 | Metric | Value |
 |---|---|
@@ -69,12 +69,12 @@ The model outputs a heteroscedastic Gaussian (mu, sigma), providing both a point
 
 | Model | MAE | Within 1°F | Within 2°F |
 |---|---|---|---|
-| **NN Bias-Correction** | **1.13°F** | **56.9%** | **83.8%** |
-| HRRR | 1.76°F | 42.3% | 69.1% |
-| NWP Ens. Mean | 2.26°F | 23.6% | 51.4% |
-| GFS | 2.52°F | 28.0% | 50.3% |
-| ECMWF | 2.75°F | 21.2% | 41.2% |
-| JMA | 4.48°F | 12.3% | 25.2% |
+| **NN Bias-Correction** | **1.24°F** | **51.3%** | **81.4%** |
+| HRRR | 2.07°F | 37.9% | 63.5% |
+| NWP Ens. Mean | 2.28°F | 26.3% | 52.4% |
+| GFS | 2.37°F | 29.5% | 53.8% |
+| ECMWF | 2.85°F | 21.6% | 42.1% |
+| JMA | 4.34°F | 12.0% | 25.4% |
 
 The model beats all 6 individual NWP models and their ensemble mean on every city.
 
@@ -135,6 +135,6 @@ Re-fetches all data from APIs (NWS/ACIS, Open-Meteo, NOAA CPC). Existing files a
 
 | Split | Date Range | Purpose |
 |---|---|---|
-| Train | 2022-01-01 to 2024-12-31 | Model training |
-| Validation | 2025-01-01 to 2025-12-31 | Early stopping / hyperparameter tuning |
-| Test | 2026-01-01 to 2026-04-16 | Out-of-sample evaluation |
+| Train | 2022-01-01 to 2024-04-16 | Model training |
+| Validation | 2024-04-17 to 2025-04-16 | Early stopping / hyperparameter tuning (1 full year) |
+| Test | 2025-04-17 to 2026-04-16 | Out-of-sample evaluation (1 full year) |
