@@ -210,7 +210,7 @@ def load_archive_hourly() -> pd.DataFrame:
 
 # ── Historical forecasts ─────────────────────────────────────────────
 
-FORECAST_MODELS = ["gfs_seamless", "ecmwf_ifs025", "icon_seamless", "gem_seamless", "jma_seamless"]
+FORECAST_MODELS = ["gfs_global", "ecmwf_ifs025", "icon_seamless", "gem_seamless", "jma_seamless", "ncep_hrrr_conus"]
 
 def fetch_weather_forecasts():
     """Fetch historical forecast model outputs for daily max temp."""
@@ -265,6 +265,85 @@ def fetch_weather_forecasts():
         time.sleep(1)
 
     log.info("Forecast fetch complete.")
+
+
+def fix_gfs_forecasts():
+    """Replace fcst_gfs_seamless (which was identical to HRRR) with true gfs_global data.
+
+    The Open-Meteo 'gfs_seamless' model blends GFS with HRRR for CONUS locations,
+    making it identical to 'ncep_hrrr_conus'. This function re-fetches pure GFS
+    data using 'gfs_global' and updates the existing forecast CSVs.
+    """
+    os.makedirs(FORECAST_DIR, exist_ok=True)
+
+    for ticker, (name, tz, lat, lon) in cfg.CITIES.items():
+        path = os.path.join(FORECAST_DIR, f"{ticker}_forecasts.csv")
+        if not os.path.exists(path):
+            log.warning("No forecast CSV for %s — run fetch_weather_forecasts() first", name)
+            continue
+
+        df = pd.read_csv(path, parse_dates=["date"])
+
+        # Skip if already migrated
+        if "fcst_gfs_global" in df.columns and "fcst_gfs_seamless" not in df.columns:
+            log.info("Skipping %s — already migrated to gfs_global", name)
+            continue
+
+        log.info("Fetching gfs_global for %s...", name)
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": START,
+            "end_date": END,
+            "daily": "temperature_2m_max",
+            "temperature_unit": "fahrenheit",
+            "timezone": tz,
+            "models": "gfs_global",
+        }
+        try:
+            for attempt in range(5):
+                resp = requests.get(HIST_FORECAST_URL, params=params, timeout=60)
+                if resp.status_code == 429:
+                    wait = 30 * (attempt + 1)
+                    log.warning("  Rate limited on %s, waiting %ds...", name, wait)
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                break
+            else:
+                log.warning("  %s: failed after retries", name)
+                continue
+
+            data = resp.json()
+            gfs_df = pd.DataFrame(data["daily"])
+            gfs_df.rename(columns={"time": "date", "temperature_2m_max": "fcst_gfs_global"}, inplace=True)
+            gfs_df["date"] = pd.to_datetime(gfs_df["date"])
+
+            # Drop old gfs_seamless column if present
+            if "fcst_gfs_seamless" in df.columns:
+                df.drop(columns=["fcst_gfs_seamless"], inplace=True)
+
+            # Drop old gfs_global column if present (re-run safety)
+            if "fcst_gfs_global" in df.columns:
+                df.drop(columns=["fcst_gfs_global"], inplace=True)
+
+            # Merge new gfs_global data
+            df = df.merge(gfs_df[["date", "fcst_gfs_global"]], on="date", how="left")
+
+            # Reorder columns: ticker, fcst_gfs_global, then the rest
+            cols = ["date", "ticker", "fcst_gfs_global"] + [
+                c for c in df.columns if c not in ("date", "ticker", "fcst_gfs_global")
+            ]
+            df = df[cols]
+            df.to_csv(path, index=False)
+            log.info("  %s: updated with gfs_global (%d rows)", name, len(df))
+
+        except Exception as e:
+            log.warning("  %s failed: %s", name, e)
+
+        time.sleep(2)
+
+    log.info("GFS forecast migration complete.")
 
 
 def load_forecasts() -> pd.DataFrame:
@@ -385,5 +464,6 @@ if __name__ == "__main__":
     fetch_nws_daily()
     fetch_weather_archive()
     fetch_weather_forecasts()
+    fix_gfs_forecasts()
     fetch_climate_indices()
     log.info("All data fetched successfully.")

@@ -18,6 +18,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+from scipy.stats import skew as _skew, kurtosis as _kurtosis
 
 import torch
 from torch.utils.data import DataLoader
@@ -33,11 +34,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 FORECAST_COLS = [
-    "fcst_gfs_seamless",
+    "fcst_gfs_global",
     "fcst_ecmwf_ifs025",
     "fcst_icon_seamless",
     "fcst_gem_seamless",
     "fcst_jma_seamless",
+    "fcst_ncep_hrrr_conus",
 ]
 
 
@@ -101,7 +103,6 @@ def build_features() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str
     log.info("After merge forecast+archive+nws: %d rows", len(df))
 
     # ── (a) Forecast ensemble statistics ────────────────────────────
-    fcst_values = df[FORECAST_COLS]
     # Fill per-city mean for any NaN forecast columns
     for col in FORECAST_COLS:
         city_means = df.groupby("ticker")[col].transform("mean")
@@ -111,47 +112,99 @@ def build_features() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str
     df["forecast_mean"] = fcst_values.mean(axis=1)
     df["forecast_std"] = fcst_values.std(axis=1)
     df["forecast_range"] = fcst_values.max(axis=1) - fcst_values.min(axis=1)
-    # IQR (75th - 25th percentile across 5 models)
     df["forecast_iqr"] = fcst_values.quantile(0.75, axis=1) - fcst_values.quantile(0.25, axis=1)
+
+    # Forecast disagreement structure
+    df["forecast_median"] = fcst_values.median(axis=1)
+    df["forecast_median_mean_gap"] = df["forecast_median"] - df["forecast_mean"]
+    df["forecast_skew"] = _skew(fcst_values.values, axis=1, nan_policy="omit")
+    df["forecast_kurtosis"] = _kurtosis(fcst_values.values, axis=1, nan_policy="omit")
+
+    # ── (a2) Forecast trend / momentum ─────────────────────────────
+    df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
+    _fm_lag1 = df.groupby("ticker")["forecast_mean"].shift(1)
+    _fs_lag1 = df.groupby("ticker")["forecast_std"].shift(1)
+    _fr_lag1 = df.groupby("ticker")["forecast_range"].shift(1)
+    df["forecast_mean_delta1"] = df["forecast_mean"] - _fm_lag1
+    df["forecast_std_delta1"] = df["forecast_std"] - _fs_lag1
+    df["forecast_mean_roll3_trend"] = (
+        df.groupby("ticker")["forecast_mean_delta1"]
+        .transform(lambda x: x.rolling(3, min_periods=1).mean())
+    )
+    df["forecast_spread_momentum"] = df["forecast_range"] - _fr_lag1
 
     # ── (b) Target: residual (NWS recorded high minus forecast mean) ─
     df["y_resid"] = df["nws_high"] - df["forecast_mean"]
 
     # ── (c) Pairwise spreads ────────────────────────────────────────
-    df["spread_ecmwf_gfs"] = df["fcst_ecmwf_ifs025"] - df["fcst_gfs_seamless"]
-    df["spread_icon_gfs"] = df["fcst_icon_seamless"] - df["fcst_gfs_seamless"]
-    df["spread_gem_gfs"] = df["fcst_gem_seamless"] - df["fcst_gfs_seamless"]
-    df["spread_jma_gfs"] = df["fcst_jma_seamless"] - df["fcst_gfs_seamless"]
+    df["spread_ecmwf_gfs"] = df["fcst_ecmwf_ifs025"] - df["fcst_gfs_global"]
+    df["spread_icon_gfs"] = df["fcst_icon_seamless"] - df["fcst_gfs_global"]
+    df["spread_gem_gfs"] = df["fcst_gem_seamless"] - df["fcst_gfs_global"]
+    df["spread_jma_gfs"] = df["fcst_jma_seamless"] - df["fcst_gfs_global"]
+    df["spread_hrrr_gfs"] = df["fcst_ncep_hrrr_conus"] - df["fcst_gfs_global"]
 
-    # ── (d) Lagged meteorological features (yesterday's weather) ─────
+    # ── (c2) Climate indices ───────────────────────────────────────
+    climate = data_fetch.load_climate_indices()
+    df = df.merge(climate, on="date", how="left")
+    for col in ["enso_oni", "ao", "nao", "pna"]:
+        df[col] = df[col].ffill()
+
+    # ── (d) Lagged meteorological features (lag-1 and lag-2) ────────
     df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
     meteo_raw = [
         "cloud_cover_mean", "dewpoint_2m_mean", "wind_speed_10m_max",
         "surface_pressure_mean", "precipitation_sum",
     ]
     for col in meteo_raw:
-        df[f"{col}_lag1"] = df.groupby("ticker")[col].shift(1)
-    meteo_cols = [f"{c}_lag1" for c in meteo_raw]
+        df = feature_utils.add_lags(df, col=col, lags=[1, 2], group_col="ticker")
+    meteo_cols_lag1 = [f"{c}_lag1" for c in meteo_raw]
+    meteo_cols_lag2 = [f"{c}_lag2" for c in meteo_raw]
+
+    # ── (d2) Moisture / humidity derived ───────────────────────────
+    df["dewpoint_depression_lag1"] = (
+        df.groupby("ticker")["temperature_2m_max"].shift(1) - df["dewpoint_2m_mean_lag1"]
+    )
+    df["precip_x_cloud_lag1"] = df["precipitation_sum_lag1"] * df["cloud_cover_mean_lag1"]
+    df["snow_flag_lag1"] = (df.groupby("ticker")["snowfall_sum"].shift(1) > 0).astype(float)
+
+    # ── (d3) Pressure change / frontal indicators ──────────────────
+    df["pressure_tendency_lag1"] = df["surface_pressure_mean_lag1"] - df["surface_pressure_mean_lag2"]
+    df["wind_direction_lag1"] = df.groupby("ticker")["wind_direction_10m_dominant"].shift(1)
+    df["wind_x_pressure_change_lag1"] = (
+        df["wind_speed_10m_max_lag1"] * df["pressure_tendency_lag1"].abs()
+    )
 
     # ── (e) Lagged temperature path (yesterday's hourly temps) ──────
     hourly_path = _build_hourly_temp_path(archive_hourly)
     hourly_path_cols = ["temp_6am", "temp_9am", "temp_noon", "temp_3pm", "temp_path_range"]
     hourly_path = hourly_path.rename(columns={c: f"{c}_lag1" for c in hourly_path_cols})
     df = df.merge(hourly_path, on=["date", "ticker"], how="left")
-    # Shift the merged columns to get yesterday's values
     for col in [f"{c}_lag1" for c in hourly_path_cols]:
         df[col] = df.groupby("ticker")[col].shift(1)
-    # Yesterday's overnight low
     df["temperature_2m_min_lag1"] = df.groupby("ticker")["temperature_2m_min"].shift(1)
 
-    # ── (f) Rolling forecast bias (shifted by 1 to avoid leaking) ──
+    # ── (f) Rolling forecast bias (mean + std, shifted by 1) ───────
     df = feature_utils.add_rolling(
-        df, col="y_resid", windows=[7, 14, 30],
-        stats=["mean"], group_col="ticker",
+        df, col="y_resid", windows=[3, 7, 14, 30],
+        stats=["mean", "std"], group_col="ticker",
     )
 
     # ── (g) City static features ────────────────────────────────────
     df = feature_utils.add_city_static_features(df)
+
+    # ── (g2) Climatological normals + anomalies ────────────────────
+    clim_normals = feature_utils.compute_climatological_normals(
+        df, train_end=pd.Timestamp(cfg.TRAIN_END), temp_col="nws_high",
+    )
+    df["doy"] = df["date"].dt.dayofyear
+    df = df.merge(clim_normals, on=["ticker", "doy"], how="left")
+    df["forecast_clim_anomaly"] = df["forecast_mean"] - df["clim_normal"]
+    _nws_lag1 = df.groupby("ticker")["nws_high"].shift(1)
+    df["yesterday_high_clim_anomaly"] = _nws_lag1 - df["clim_normal"]
+    df.drop(columns=["doy"], inplace=True)
+
+    # ── (g3) Solar / astronomical features ─────────────────────────
+    df = feature_utils.add_solar_features(df)
 
     # ── (h) Calendar features ───────────────────────────────────────
     df = feature_utils.add_calendar_features(df)
@@ -159,32 +212,60 @@ def build_features() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str
     # ── (i) City index for embedding ────────────────────────────────
     df = feature_utils.add_city_index(df)
 
+    # ── (j) Cross-feature interactions ─────────────────────────────
+    df["forecast_mean_x_std"] = df["forecast_mean"] * df["forecast_std"]
+    df["spread_range_x_cloud"] = df["forecast_range"] * df["cloud_cover_mean_lag1"]
+    df["elevation_x_pressure"] = df["elevation_ft"] * df["surface_pressure_mean_lag1"]
+    df["coastal_x_wind"] = df["coastal"] * df["wind_speed_10m_max_lag1"]
+
     # ── Drop rows where NWS high is NaN ─────────────────────────────
     before = len(df)
     df = df.dropna(subset=["nws_high"]).reset_index(drop=True)
     log.info("Dropped %d rows with NaN NWS high (remaining: %d)", before - len(df), len(df))
 
-    # ── Define continuous feature columns ───────────────────────────
-    # Forecast highs
+    # ── Define continuous feature columns (75 total) ───────────────
+    # Raw forecast model outputs (6)
     cont_cols = list(FORECAST_COLS)
-    # Ensemble stats
+    # Ensemble stats (4)
     cont_cols += ["forecast_mean", "forecast_std", "forecast_range", "forecast_iqr"]
-    # Pairwise spreads
-    cont_cols += ["spread_ecmwf_gfs", "spread_icon_gfs", "spread_gem_gfs", "spread_jma_gfs"]
-    # Lagged meteorological (yesterday's weather)
-    cont_cols += meteo_cols
-    # Lagged hourly path (yesterday's temps)
+    # Forecast disagreement structure (4)
+    cont_cols += ["forecast_median", "forecast_median_mean_gap", "forecast_skew", "forecast_kurtosis"]
+    # Pairwise spreads (5)
+    cont_cols += ["spread_ecmwf_gfs", "spread_icon_gfs", "spread_gem_gfs", "spread_jma_gfs", "spread_hrrr_gfs"]
+    # Forecast momentum (4)
+    cont_cols += ["forecast_mean_delta1", "forecast_std_delta1", "forecast_mean_roll3_trend", "forecast_spread_momentum"]
+    # Climate indices (4)
+    cont_cols += ["enso_oni", "ao", "nao", "pna"]
+    # Lagged meteorological lag-1 (5)
+    cont_cols += meteo_cols_lag1
+    # Lagged meteorological lag-2 (5)
+    cont_cols += meteo_cols_lag2
+    # Moisture / humidity derived (3)
+    cont_cols += ["dewpoint_depression_lag1", "precip_x_cloud_lag1", "snow_flag_lag1"]
+    # Pressure change / frontal (3)
+    cont_cols += ["pressure_tendency_lag1", "wind_direction_lag1", "wind_x_pressure_change_lag1"]
+    # Lagged hourly path (5)
     cont_cols += [f"{c}_lag1" for c in ["temp_6am", "temp_9am", "temp_noon", "temp_3pm", "temp_path_range"]]
-    # Yesterday's overnight low
+    # Yesterday's overnight low (1)
     cont_cols += ["temperature_2m_min_lag1"]
-    # Rolling bias
-    cont_cols += ["y_resid_roll7_mean", "y_resid_roll14_mean", "y_resid_roll30_mean"]
-    # City static
-    cont_cols += ["lat", "lon", "elevation_ft", "coastal", "continentality"]
-    # Calendar
+    # Rolling bias mean (4)
+    cont_cols += ["y_resid_roll3_mean", "y_resid_roll7_mean", "y_resid_roll14_mean", "y_resid_roll30_mean"]
+    # Rolling bias std (3)
+    cont_cols += ["y_resid_roll7_std", "y_resid_roll14_std", "y_resid_roll30_std"]
+    # Climatology anomalies (3)
+    cont_cols += ["clim_normal", "forecast_clim_anomaly", "yesterday_high_clim_anomaly"]
+    # City static (6)
+    cont_cols += ["lat", "lon", "elevation_ft", "coastal", "desert", "continentality"]
+    # Calendar (4)
     cont_cols += ["sin_doy", "cos_doy", "sin_month", "cos_month"]
+    # Solar / astronomical (3)
+    cont_cols += ["day_length_hours", "solar_declination", "days_since_winter_solstice"]
+    # Cross-feature interactions (4)
+    cont_cols += ["forecast_mean_x_std", "spread_range_x_cloud", "elevation_x_pressure", "coastal_x_wind"]
 
-    # Fill remaining NaNs in continuous features with 0 (rolling features will have NaN at start)
+    assert len(cont_cols) == 76, f"Expected 76 continuous features, got {len(cont_cols)}"
+
+    # Fill remaining NaNs in continuous features with 0
     df[cont_cols] = df[cont_cols].fillna(0.0)
 
     log.info("Total continuous features: %d", len(cont_cols))
@@ -203,6 +284,8 @@ def train():
     train_df, val_df, test_df, cont_cols = build_features()
 
     # Save unscaled values needed for evaluation before scaling
+    train_forecast_mean_raw = train_df["forecast_mean"].values.copy()
+    train_actual_temp_raw = train_df["nws_high"].values.copy()
     val_forecast_mean_raw = val_df["forecast_mean"].values.copy()
     val_actual_temp_raw = val_df["nws_high"].values.copy()
     test_forecast_mean_raw = test_df["forecast_mean"].values.copy()
@@ -295,12 +378,17 @@ def train():
     for k, v in resid_metrics.items():
         log.info("  %s: %.4f", k, v)
 
-    # ── Save val + test predictions ─────────────────────────────────
+    # ── Save train + val + test predictions ──────────────────────────
+    train_loader_eval = training.make_loader(
+        training.make_dataset(train_df[cont_cols].values, train_df["city_idx"].values, train_df["y_resid"].values),
+        batch_size=cfg.MODEL1_HP["batch_size"], shuffle=False)
+    mu_train_r, sigma_train_r = training.predict(model, train_loader_eval)
     val_loader_eval = training.make_loader(
         training.make_dataset(val_df[cont_cols].values, val_df["city_idx"].values, val_df["y_resid"].values),
         batch_size=cfg.MODEL1_HP["batch_size"], shuffle=False)
     mu_val_r, sigma_val_r = training.predict(model, val_loader_eval)
     for split_name, split_df, mu_r, sigma_r, fcst_raw, actual_raw in [
+        ("train", train_df, mu_train_r, sigma_train_r, train_forecast_mean_raw, train_actual_temp_raw),
         ("val", val_df, mu_val_r, sigma_val_r, val_forecast_mean_raw, val_actual_temp_raw),
         ("test", test_df, mu_resid, sigma_resid, test_forecast_mean_raw, test_actual_temp_raw),
     ]:
@@ -311,8 +399,8 @@ def train():
             "sigma": sigma_r,
             "y_true": actual_raw,
         })
-        path = os.path.join(cfg.CHECKPOINT_DIR, f"model1_preds_{split_name}.csv")
-        pred_df.to_csv(path, index=False)
+        path = os.path.join(cfg.CHECKPOINT_DIR, f"model1_preds_{split_name}.parquet")
+        pred_df.to_parquet(path, index=False)
         log.info("Saved %s predictions to %s", split_name, path)
 
     return model, history, test_df

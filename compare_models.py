@@ -2,7 +2,7 @@
 Compare forecast models against NWS daily recorded high temperatures.
 
 Models compared:
-  - 5 NWP forecast models (GFS, ECMWF, ICON, GEM, JMA) + their ensemble mean
+  - 6 NWP forecast models (GFS, ECMWF, ICON, GEM, JMA, HRRR) + their ensemble mean
   - Neural net bias-correction model
 
 Metrics: MAE, RMSE, Bias (mean error), correlation, % within 1/2/3 deg F
@@ -70,9 +70,9 @@ def run_comparison():
     ckpt = cfg.CHECKPOINT_DIR
 
     for split, store in [("test", nn_models), ("val", nn_models_val)]:
-        path = os.path.join(ckpt, f"model1_preds_{split}.csv")
+        path = os.path.join(ckpt, f"model1_preds_{split}.parquet")
         if os.path.exists(path):
-            pred_df = pd.read_csv(path, parse_dates=["date"])
+            pred_df = pd.read_parquet(path)
             store["NN Bias-Correction"] = pred_df
             log.info("Loaded model1 %s predictions: %d rows", split, len(pred_df))
 
@@ -87,11 +87,12 @@ def run_comparison():
     # ── Compare NWP models across all splits ─────────────────────────
     nwp_models = fcst_cols + ["fcst_ensemble_mean"]
     nwp_display = {
-        "fcst_gfs_seamless": "GFS",
+        "fcst_gfs_global": "GFS",
         "fcst_ecmwf_ifs025": "ECMWF",
         "fcst_icon_seamless": "ICON",
         "fcst_gem_seamless": "GEM",
         "fcst_jma_seamless": "JMA",
+        "fcst_ncep_hrrr_conus": "HRRR",
         "fcst_ensemble_mean": "NWP Ens. Mean",
     }
 

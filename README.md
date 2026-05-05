@@ -15,43 +15,75 @@ The model outputs a heteroscedastic Gaussian (mu, sigma), providing both a point
 ## Architecture
 
 - **Type**: MLP with city embeddings
-- **Input**: 27 continuous features + 8-dim city embedding
+- **Input**: 76 continuous features + 8-dim city embedding
 - **Hidden layers**: [128, 64, 32] with BatchNorm, GELU, dropout
 - **Output**: (mu, sigma) — heteroscedastic Gaussian
 - **Loss**: Gaussian negative log-likelihood
-- **Parameters**: ~15,000
+- **Parameters**: ~22,000
 
-## Features (27 continuous)
+## Features (76 continuous)
 
-| Category | Features |
-|---|---|
-| Forecast ensemble stats | mean, std, range, IQR across 5 NWP models |
-| Individual NWP outputs | GFS, ECMWF, ICON, GEM, JMA |
-| Pairwise spreads | ECMWF-GFS, ICON-GFS, GEM-GFS, JMA-GFS |
-| Lagged meteorology | cloud cover, dewpoint, wind, pressure, precip (yesterday) |
-| Lagged hourly temps | 6am, 9am, noon, 3pm, diurnal range (yesterday) |
-| Rolling forecast bias | 7-day, 14-day, 30-day rolling mean residual |
-| City static | lat, lon, elevation, coastal, continentality |
-| Calendar | sin/cos day-of-year, sin/cos month |
+| Category | Features | Count |
+|---|---|---|
+| Raw NWP forecasts | GFS, ECMWF, ICON, GEM, JMA, HRRR | 6 |
+| Ensemble stats | mean, std, range, IQR | 4 |
+| Forecast disagreement | median, median-mean gap, skewness, kurtosis | 4 |
+| Pairwise spreads | ECMWF-GFS, ICON-GFS, GEM-GFS, JMA-GFS, HRRR-GFS | 5 |
+| Forecast momentum | mean delta, std delta, 3-day trend, spread momentum | 4 |
+| Climate indices | ENSO (ONI), AO, NAO, PNA | 4 |
+| Lagged meteorology (lag-1) | cloud cover, dewpoint, wind, pressure, precip | 5 |
+| Lagged meteorology (lag-2) | cloud cover, dewpoint, wind, pressure, precip | 5 |
+| Moisture / humidity | dewpoint depression, precip×cloud, snow flag | 3 |
+| Pressure / frontal | pressure tendency, wind direction, wind×pressure change | 3 |
+| Lagged hourly temps | 6am, 9am, noon, 3pm, diurnal range (yesterday) | 5 |
+| Overnight low | yesterday's minimum temperature | 1 |
+| Rolling forecast bias (mean) | 3-day, 7-day, 14-day, 30-day | 4 |
+| Rolling forecast bias (std) | 7-day, 14-day, 30-day | 3 |
+| Climatology anomalies | climatological normal, forecast anomaly, yesterday's anomaly | 3 |
+| City static | lat, lon, elevation, coastal, desert, continentality | 6 |
+| Calendar | sin/cos day-of-year, sin/cos month | 4 |
+| Solar / astronomical | day length, solar declination, days since winter solstice | 3 |
+| Cross interactions | mean×std, spread×cloud, elevation×pressure, coastal×wind | 4 |
 
-## Performance (Out-of-Sample Test: Jan–Apr 2026)
+## Performance
+
+### Out-of-Sample (Test: Jan–Apr 2026)
 
 | Metric | Value |
 |---|---|
-| MAE | 1.11°F |
-| RMSE | 1.49°F |
-| Bias | -0.02°F |
-| R² | 0.994 |
+| MAE | 1.13°F |
+| RMSE | 1.54°F |
+| Bias | -0.04°F |
+| R² | 0.993 |
 | Correlation | 0.997 |
 
-The model beats all 5 individual NWP models and their ensemble mean on the test set.
+### In-Sample (Train: 2022–2024)
+
+| Metric | Value |
+|---|---|
+| MAE | 1.00°F |
+| RMSE | 1.38°F |
+| R² | 0.995 |
+
+### vs NWP Forecasts (Test Set)
+
+| Model | MAE | Within 1°F | Within 2°F |
+|---|---|---|---|
+| **NN Bias-Correction** | **1.13°F** | **56.9%** | **83.8%** |
+| HRRR | 1.76°F | 42.3% | 69.1% |
+| NWP Ens. Mean | 2.26°F | 23.6% | 51.4% |
+| GFS | 2.52°F | 28.0% | 50.3% |
+| ECMWF | 2.75°F | 21.2% | 41.2% |
+| JMA | 4.48°F | 12.3% | 25.2% |
+
+The model beats all 6 individual NWP models and their ensemble mean on every city.
 
 ## Data
 
 All data is included in the `data/` directory:
 
 - `data/nws_daily/` — NWS daily recorded highs from ACIS (ground truth target)
-- `data/weather_forecasts/` — Historical NWP model forecasts from Open-Meteo
+- `data/weather_forecasts/` — Historical NWP model forecasts from Open-Meteo (GFS, ECMWF, ICON, GEM, JMA, HRRR)
 - `data/weather_archive/` — Historical daily + hourly weather from Open-Meteo (features)
 - `data/climate_indices/` — ENSO, AO, NAO, PNA from NOAA CPC
 
@@ -71,8 +103,9 @@ python model1_forecast.py
 This builds features, trains the model with early stopping, and saves:
 - `checkpoints/model1_best.pt` — best model weights
 - `checkpoints/model1_scaler.pkl` — fitted StandardScaler
-- `checkpoints/model1_preds_val.csv` — validation predictions
-- `checkpoints/model1_preds_test.csv` — test predictions
+- `checkpoints/model1_preds_train.parquet` — in-sample predictions
+- `checkpoints/model1_preds_val.parquet` — validation predictions
+- `checkpoints/model1_preds_test.parquet` — test predictions
 
 ### Compare against NWP forecasts
 
@@ -80,15 +113,15 @@ This builds features, trains the model with early stopping, and saves:
 python compare_models.py
 ```
 
-Prints MAE/RMSE/bias tables comparing the neural net against GFS, ECMWF, ICON, GEM, JMA, and their ensemble mean across train/val/test splits.
+Prints MAE/RMSE/bias tables comparing the neural net against GFS, ECMWF, ICON, GEM, JMA, HRRR, and their ensemble mean across train/val/test splits.
 
-### Out-of-sample analysis notebook
+### Performance analysis notebook
 
 ```bash
-jupyter notebook model1_oos.ipynb
+jupyter notebook performance.ipynb
 ```
 
-Detailed evaluation: per-city metrics, calibration plots, residual diagnostics, time series visualization, MAE heatmaps.
+In-sample and out-of-sample evaluation: overall metrics, per-city breakdown, calibration plots, residual diagnostics, time series visualization, MAE heatmaps.
 
 ### Refresh data (optional)
 

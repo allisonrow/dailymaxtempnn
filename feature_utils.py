@@ -32,6 +32,30 @@ def add_calendar_features(df: pd.DataFrame, date_col: str = "date") -> pd.DataFr
     return df
 
 
+# ── Solar / astronomical features ───────────────────────────────────
+
+def add_solar_features(df: pd.DataFrame, date_col: str = "date",
+                       lat_col: str = "lat") -> pd.DataFrame:
+    """Add day_length_hours, solar_declination, days_since_winter_solstice."""
+    doy = df[date_col].dt.dayofyear.values.astype(float)
+    lat_rad = np.radians(df[lat_col].values)
+
+    # Solar declination (degrees)
+    decl_rad = np.radians(23.44) * np.sin(np.radians((360.0 / 365.25) * (doy + 284)))
+    df["solar_declination"] = np.degrees(decl_rad)
+
+    # Day length (hours) via sunrise equation
+    cos_ha = -np.tan(lat_rad) * np.tan(decl_rad)
+    cos_ha = np.clip(cos_ha, -1.0, 1.0)
+    hour_angle = np.degrees(np.arccos(cos_ha))
+    df["day_length_hours"] = (2.0 / 15.0) * hour_angle
+
+    # Days since winter solstice (Dec 21 ≈ DOY 355)
+    df["days_since_winter_solstice"] = np.where(doy >= 355, doy - 355, doy + 10)
+
+    return df
+
+
 # ── City features ────────────────────────────────────────────────────
 
 def city_static_features(ticker: str) -> dict:
