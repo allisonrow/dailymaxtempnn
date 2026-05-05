@@ -122,6 +122,39 @@ class ScalerWrapper:
         return self
 
 
+# ── Onshore wind features ───────────────────────────────────────────
+
+def add_onshore_wind_features(df: pd.DataFrame,
+                               ticker_col: str = "ticker") -> pd.DataFrame:
+    """Compute onshore_wind_component and wind_speed_x_onshore using WATER_BODY_BEARING.
+
+    onshore_wind_component = cos(wind_direction_lag1_rad - bearing_rad) for coastal cities,
+    0.0 for inland cities (bearing is None).
+    wind_speed_x_onshore = wind_speed_10m_max_lag1 * onshore_wind_component
+    """
+    bearing_map = cfg.WATER_BODY_BEARING
+    bearing_series = df[ticker_col].map(bearing_map)
+    has_bearing = bearing_series.notna()
+
+    wind_dir_rad = np.radians(df["wind_direction_lag1"].values)
+    bearing_rad = np.radians(bearing_series.fillna(0).values)
+
+    onshore = np.where(has_bearing,
+                       np.cos(wind_dir_rad - bearing_rad),
+                       0.0)
+    df["onshore_wind_component"] = onshore
+    df["wind_speed_x_onshore"] = df["wind_speed_10m_max_lag1"].values * onshore
+    return df
+
+
+def add_wind_direction_encoding(df: pd.DataFrame) -> pd.DataFrame:
+    """Add sin/cos encoding of wind_direction_lag1."""
+    angle = 2 * math.pi * df["wind_direction_lag1"].values / 360.0
+    df["wind_dir_sin_lag1"] = np.sin(angle)
+    df["wind_dir_cos_lag1"] = np.cos(angle)
+    return df
+
+
 # ── Climatological normals ───────────────────────────────────────────
 
 def compute_climatological_normals(df: pd.DataFrame, train_end: pd.Timestamp,

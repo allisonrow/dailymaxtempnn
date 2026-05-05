@@ -94,6 +94,31 @@ CITY_META = {
     "KXHIGHTNOLA": {"elevation_ft": 3,    "coastal": True,  "desert": False, "continentality": 0.20},
 }
 
+# ── Water body bearing (degrees) for onshore wind calculation ────────
+# Bearing from city to nearest major water body; None = inland.
+WATER_BODY_BEARING = {
+    "KXHIGHCHI":    90,    # Lake Michigan is east
+    "KXHIGHMIA":    180,   # Atlantic south
+    "KXHIGHTBOS":   90,    # harbor east
+    "KXHIGHLAX":    250,   # Pacific SW
+    "KXHIGHNY":     135,   # Atlantic SE
+    "KXHIGHPHIL":   135,   # Delaware Bay SE
+    "KXHIGHTSEA":   270,   # Puget Sound west
+    "KXHIGHTSFO":   270,   # Pacific west
+    "KXHIGHTNOLA":  180,   # Gulf south
+    "KXHIGHTHOU":   150,   # Gulf SE
+    "KXHIGHTATL":   None,  # inland
+    "KXHIGHAUS":    None,  # inland
+    "KXHIGHTDAL":   None,  # inland
+    "KXHIGHTOKC":   None,  # inland
+    "KXHIGHTPHX":   None,  # inland
+    "KXHIGHTLV":    None,  # inland
+    "KXHIGHDEN":    None,  # inland
+    "KXHIGHTMIN":   0,     # inland — Lake Superior is far
+    "KXHIGHTSATX":  None,  # inland
+    "KXHIGHTDC":    135,   # Chesapeake Bay SE
+}
+
 # ── Model hyperparameters ────────────────────────────────────────────
 MODEL1_HP = {
     "hidden_dims": [128, 64, 32],

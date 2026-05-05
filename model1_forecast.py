@@ -120,6 +120,11 @@ def build_features() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str
     df["forecast_skew"] = _skew(fcst_values.values, axis=1, nan_policy="omit")
     df["forecast_kurtosis"] = _kurtosis(fcst_values.values, axis=1, nan_policy="omit")
 
+    # Forecast ensemble bimodality (feature 18)
+    df["forecast_ensemble_bimodality"] = (
+        (df["forecast_median"] - df["forecast_mean"]).abs() / (df["forecast_std"] + 0.1)
+    )
+
     # ── (a2) Forecast trend / momentum ─────────────────────────────
     df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
     _fm_lag1 = df.groupby("ticker")["forecast_mean"].shift(1)
@@ -135,6 +140,21 @@ def build_features() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str
 
     # ── (b) Target: residual (NWS recorded high minus forecast mean) ─
     df["y_resid"] = df["nws_high"] - df["forecast_mean"]
+
+    # ── (b2) Seasonal model skill lookup (feature 19) ──────────────
+    # Per-city per-month average absolute residual from training data only.
+    _train_mask = df["date"] <= pd.Timestamp(cfg.TRAIN_END)
+    _train_skill = df.loc[_train_mask].copy()
+    _train_skill["_month"] = _train_skill["date"].dt.month
+    _skill_lookup = (
+        _train_skill.groupby(["ticker", "_month"])["y_resid"]
+        .apply(lambda x: x.abs().mean())
+        .reset_index()
+        .rename(columns={"y_resid": "seasonal_model_skill"})
+    )
+    df["_month"] = df["date"].dt.month
+    df = df.merge(_skill_lookup, on=["ticker", "_month"], how="left")
+    df.drop(columns=["_month"], inplace=True)
 
     # ── (c) Pairwise spreads ────────────────────────────────────────
     df["spread_ecmwf_gfs"] = df["fcst_ecmwf_ifs025"] - df["fcst_gfs_global"]
@@ -156,9 +176,18 @@ def build_features() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str
         "surface_pressure_mean", "precipitation_sum",
     ]
     for col in meteo_raw:
-        df = feature_utils.add_lags(df, col=col, lags=[1, 2], group_col="ticker")
+        lags = [1, 2, 3] if col == "surface_pressure_mean" else [1, 2]
+        df = feature_utils.add_lags(df, col=col, lags=lags, group_col="ticker")
     meteo_cols_lag1 = [f"{c}_lag1" for c in meteo_raw]
     meteo_cols_lag2 = [f"{c}_lag2" for c in meteo_raw]
+
+    # Wind direction lag-2 (lag-1 is added below in the pressure section)
+    df = feature_utils.add_lags(df, col="wind_direction_10m_dominant", lags=[1, 2], group_col="ticker")
+    # Rename to match existing convention (wind_direction_lag1 is used later)
+    df.rename(columns={
+        "wind_direction_10m_dominant_lag1": "_wind_dir_lag1_dup",
+        "wind_direction_10m_dominant_lag2": "wind_direction_lag2",
+    }, inplace=True)
 
     # ── (d2) Moisture / humidity derived ───────────────────────────
     df["dewpoint_depression_lag1"] = (
@@ -192,6 +221,10 @@ def build_features() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str
     # ── (g) City static features ────────────────────────────────────
     df = feature_utils.add_city_static_features(df)
 
+    # ── (g1b) Wind direction encoding + onshore wind ────────────────
+    df = feature_utils.add_wind_direction_encoding(df)
+    df = feature_utils.add_onshore_wind_features(df)
+
     # ── (g2) Climatological normals + anomalies ────────────────────
     clim_normals = feature_utils.compute_climatological_normals(
         df, train_end=pd.Timestamp(cfg.TRAIN_END), temp_col="nws_high",
@@ -201,6 +234,16 @@ def build_features() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str
     df["forecast_clim_anomaly"] = df["forecast_mean"] - df["clim_normal"]
     _nws_lag1 = df.groupby("ticker")["nws_high"].shift(1)
     df["yesterday_high_clim_anomaly"] = _nws_lag1 - df["clim_normal"]
+
+    # ── (g2b) Climatological std + normalized anomaly (feature 20) ─
+    _train_clim = df[df["date"] <= pd.Timestamp(cfg.TRAIN_END)].copy()
+    _clim_std = (_train_clim.groupby(["ticker", "doy"])["nws_high"]
+                 .std().reset_index().rename(columns={"nws_high": "clim_std"}))
+    df = df.merge(_clim_std, on=["ticker", "doy"], how="left")
+    df["forecast_mean_vs_clim_extreme"] = (
+        (df["forecast_mean"] - df["clim_normal"]).abs() / (df["clim_std"].fillna(0) + 0.1)
+    )
+
     df.drop(columns=["doy"], inplace=True)
 
     # ── (g3) Solar / astronomical features ─────────────────────────
@@ -218,13 +261,78 @@ def build_features() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str
     df["elevation_x_pressure"] = df["elevation_ft"] * df["surface_pressure_mean_lag1"]
     df["coastal_x_wind"] = df["coastal"] * df["wind_speed_10m_max_lag1"]
 
+    # ── (k) Additional derived features ──────────────────────────────
+
+    # Humidity/moisture (features 5-6)
+    df["relative_humidity_proxy_lag1"] = (
+        100.0 - 5.0 * (df.groupby("ticker")["temperature_2m_max"].shift(1) - df["dewpoint_2m_mean_lag1"])
+    ).clip(0, 100)
+    df["high_dewpoint_flag"] = (df["dewpoint_2m_mean_lag1"] > 70).astype(float)
+
+    # Temperature regime (features 7-9)
+    df["temp_volatility_7d"] = (
+        df.groupby("ticker")["nws_high"]
+        .transform(lambda x: x.shift(1).rolling(7, min_periods=1).std())
+    )
+    df["temp_range_3d"] = (
+        df.groupby("ticker")["nws_high"]
+        .transform(lambda x: x.shift(1).rolling(3, min_periods=1).max()
+                   - x.shift(1).rolling(3, min_periods=1).min())
+    )
+
+    # max_temp_yesterday_rank: percentile rank using training quantiles only
+    _train_quantiles = (
+        df[df["date"] <= pd.Timestamp(cfg.TRAIN_END)]
+        .groupby("ticker")["nws_high"]
+        .quantile(np.arange(0, 1.01, 0.01))
+        .reset_index()
+        .rename(columns={"level_1": "q", "nws_high": "val"})
+    )
+    _nws_lag1_vals = df.groupby("ticker")["nws_high"].shift(1)
+    _rank_values = np.zeros(len(df))
+    for ticker in df["ticker"].unique():
+        mask = df["ticker"] == ticker
+        q_vals = _train_quantiles[_train_quantiles["ticker"] == ticker]["val"].values
+        if len(q_vals) > 0:
+            _rank_values[mask.values] = np.searchsorted(
+                np.sort(q_vals), _nws_lag1_vals[mask].values, side="right"
+            ) / len(q_vals)
+    df["max_temp_yesterday_rank"] = _rank_values
+
+    # Forecast bias regime (feature 10)
+    df["forecast_cold_bias_regime"] = (df["y_resid_roll14_mean"].abs() > 1.0).astype(float)
+
+    # Cloud/precip (features 11-12)
+    df["cloud_cover_trend_2d"] = df["cloud_cover_mean_lag1"] - df["cloud_cover_mean_lag2"]
+    df["precip_probability_proxy"] = (
+        np.maximum(0, 1.0 - df["dewpoint_depression_lag1"] / 20.0)
+        * df["cloud_cover_mean_lag1"] / 100.0
+    )
+
+    # Rates of change (features 13-14)
+    df["overnight_cooling_rate"] = df["temp_6am_lag1"] - df["temperature_2m_min_lag1"]
+    df["morning_warming_rate"] = (df["temp_noon_lag1"] - df["temp_6am_lag1"]) / 6.0
+
+    # Pressure dynamics (feature 15)
+    df["pressure_acceleration"] = (
+        df["pressure_tendency_lag1"]
+        - (df["surface_pressure_mean_lag2"] - df["surface_pressure_mean_lag3"])
+    )
+
+    # Wind direction change (feature 16)
+    _wd_diff = (df["wind_direction_lag1"] - df["wind_direction_lag2"]).abs()
+    df["wind_direction_change_lag12"] = np.minimum(_wd_diff, 360.0 - _wd_diff)
+
+    # Interaction/seasonal (feature 17)
+    df["continentality_x_season"] = df["continentality"] * df["cos_doy"]
+
     # ── Drop rows where NWS high is NaN ─────────────────────────────
     before = len(df)
     df = df.dropna(subset=["nws_high"]).reset_index(drop=True)
     log.info("Dropped %d rows with NaN NWS high (remaining: %d)", before - len(df), len(df))
 
     # ── Define continuous feature columns (75 total) ───────────────
-    # Raw forecast model outputs (6)
+    # Raw forecast model outputs (7: 6 Open-Meteo + 1 IEM GFS MOS)
     cont_cols = list(FORECAST_COLS)
     # Ensemble stats (4)
     cont_cols += ["forecast_mean", "forecast_std", "forecast_range", "forecast_iqr"]
@@ -262,8 +370,34 @@ def build_features() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str
     cont_cols += ["day_length_hours", "solar_declination", "days_since_winter_solstice"]
     # Cross-feature interactions (4)
     cont_cols += ["forecast_mean_x_std", "spread_range_x_cloud", "elevation_x_pressure", "coastal_x_wind"]
+    # Wind direction encoding (2)
+    cont_cols += ["wind_dir_sin_lag1", "wind_dir_cos_lag1"]
+    # Onshore wind (2)
+    cont_cols += ["onshore_wind_component", "wind_speed_x_onshore"]
+    # Humidity/moisture (2)
+    cont_cols += ["relative_humidity_proxy_lag1", "high_dewpoint_flag"]
+    # Temperature regime (3)
+    cont_cols += ["temp_volatility_7d", "temp_range_3d", "max_temp_yesterday_rank"]
+    # Forecast bias regime (1)
+    cont_cols += ["forecast_cold_bias_regime"]
+    # Cloud/precip (2)
+    cont_cols += ["cloud_cover_trend_2d", "precip_probability_proxy"]
+    # Rates of change (2)
+    cont_cols += ["overnight_cooling_rate", "morning_warming_rate"]
+    # Pressure dynamics (1)
+    cont_cols += ["pressure_acceleration"]
+    # Wind direction change (1)
+    cont_cols += ["wind_direction_change_lag12"]
+    # Interaction/seasonal (1)
+    cont_cols += ["continentality_x_season"]
+    # Forecast ensemble bimodality (1)
+    cont_cols += ["forecast_ensemble_bimodality"]
+    # Seasonal model skill (1)
+    cont_cols += ["seasonal_model_skill"]
+    # Normalized anomaly (1)
+    cont_cols += ["forecast_mean_vs_clim_extreme"]
 
-    assert len(cont_cols) == 76, f"Expected 76 continuous features, got {len(cont_cols)}"
+    assert len(cont_cols) == 96, f"Expected 96 continuous features, got {len(cont_cols)}"
 
     # Fill remaining NaNs in continuous features with 0
     df[cont_cols] = df[cont_cols].fillna(0.0)

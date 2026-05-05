@@ -15,13 +15,13 @@ The model outputs a heteroscedastic Gaussian (mu, sigma), providing both a point
 ## Architecture
 
 - **Type**: MLP with city embeddings
-- **Input**: 76 continuous features + 8-dim city embedding
+- **Input**: 96 continuous features + 8-dim city embedding
 - **Hidden layers**: [128, 64, 32] with BatchNorm, GELU, dropout
 - **Output**: (mu, sigma) — heteroscedastic Gaussian
 - **Loss**: Gaussian negative log-likelihood
-- **Parameters**: ~22,000
+- **Parameters**: ~24,500
 
-## Features (76 continuous)
+## Features (96 continuous)
 
 | Category | Features | Count |
 |---|---|---|
@@ -33,17 +33,27 @@ The model outputs a heteroscedastic Gaussian (mu, sigma), providing both a point
 | Climate indices | ENSO (ONI), AO, NAO, PNA | 4 |
 | Lagged meteorology (lag-1) | cloud cover, dewpoint, wind, pressure, precip | 5 |
 | Lagged meteorology (lag-2) | cloud cover, dewpoint, wind, pressure, precip | 5 |
-| Moisture / humidity | dewpoint depression, precip×cloud, snow flag | 3 |
-| Pressure / frontal | pressure tendency, wind direction, wind×pressure change | 3 |
+| Moisture / humidity | dewpoint depression, precip×cloud, snow flag, RH proxy, high dewpoint flag | 5 |
+| Pressure / frontal | pressure tendency, wind direction, wind×pressure change, pressure acceleration | 4 |
+| Wind direction encoding | sin/cos wind direction lag-1 | 2 |
+| Onshore wind | onshore wind component, wind speed × onshore | 2 |
+| Wind direction change | circular difference lag-1 vs lag-2 | 1 |
 | Lagged hourly temps | 6am, 9am, noon, 3pm, diurnal range (yesterday) | 5 |
 | Overnight low | yesterday's minimum temperature | 1 |
+| Rates of change | overnight cooling rate, morning warming rate | 2 |
+| Temperature regime | 7-day volatility, 3-day range, yesterday rank (training quantiles) | 3 |
 | Rolling forecast bias (mean) | 3-day, 7-day, 14-day, 30-day | 4 |
 | Rolling forecast bias (std) | 7-day, 14-day, 30-day | 3 |
+| Forecast bias regime | cold bias regime flag (14-day abs mean > 1°F) | 1 |
+| Cloud / precip | cloud cover 2-day trend, precipitation probability proxy | 2 |
 | Climatology anomalies | climatological normal, forecast anomaly, yesterday's anomaly | 3 |
+| Normalized anomaly | forecast mean vs climatological extreme (using clim std) | 1 |
+| Forecast ensemble bimodality | abs(median - mean) / (std + 0.1) | 1 |
+| Seasonal model skill | per-city per-month mean abs residual (training data) | 1 |
 | City static | lat, lon, elevation, coastal, desert, continentality | 6 |
 | Calendar | sin/cos day-of-year, sin/cos month | 4 |
 | Solar / astronomical | day length, solar declination, days since winter solstice | 3 |
-| Cross interactions | mean×std, spread×cloud, elevation×pressure, coastal×wind | 4 |
+| Cross interactions | mean×std, spread×cloud, elevation×pressure, coastal×wind, continentality×season | 5 |
 
 ## Performance
 
@@ -51,25 +61,17 @@ The model outputs a heteroscedastic Gaussian (mu, sigma), providing both a point
 
 | Metric | Value |
 |---|---|
-| MAE | 1.24°F |
-| RMSE | 1.65°F |
-| Bias | +0.04°F |
+| MAE | 1.25°F |
+| RMSE | 1.66°F |
+| Bias | -0.01°F |
 | R² | 0.992 |
 | Correlation | 0.996 |
-
-### In-Sample (Train: 2022–Apr 2024)
-
-| Metric | Value |
-|---|---|
-| MAE | 1.00°F |
-| RMSE | 1.38°F |
-| R² | 0.995 |
 
 ### vs NWP Forecasts (Test Set)
 
 | Model | MAE | Within 1°F | Within 2°F |
 |---|---|---|---|
-| **NN Bias-Correction** | **1.24°F** | **51.3%** | **81.4%** |
+| **NN Bias-Correction** | **1.25°F** | **50.7%** | **81.0%** |
 | HRRR | 2.07°F | 37.9% | 63.5% |
 | NWP Ens. Mean | 2.28°F | 26.3% | 52.4% |
 | GFS | 2.37°F | 29.5% | 53.8% |
